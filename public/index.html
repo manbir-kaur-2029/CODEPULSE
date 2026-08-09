@@ -1,164 +1,499 @@
-const express = require('express');
-const compression = require('compression');
-const path = require('path');
-const app = express();
-
-app.use(compression());
-app.use(express.json({ limit: '2mb' }));
-
-app.use((req, res, next) => {
-  res.setHeader('X-Frame-Options', 'SAMEORIGIN');
-  res.setHeader('X-XSS-Protection', '1; mode=block');
-  res.setHeader('X-Content-Type-Options', 'nosniff');
-  res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
-  res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
-  next();
-}); 
-app.use(express.static(path.join(__dirname, 'public'), {
-  maxAge: '1d',
-  etag: true,
-  lastModified: true,
-}));
-
-// Here's the Detection engine 
-// Each check returns { label, detail, delta, hit } where delta is the
-// score impact (negative = suspicious, positive = human-authenticity signal).
-function runChecks(codeText, commitCount) {
-  const checks = [];
-  const len = codeText.length || 1;
-
-   // 1. Leftover AI conversational boilerplate
-  const boilerplateHit = /as an ai|here is the code|hope this helps|certainly!|i cannot |as a language model/i.test(codeText);
-  checks.push({
-    label: 'Conversational AI residue',
-    detail: boilerplateHit
-      ? 'Leftover assistant-style phrasing found in comments or strings.'
-      : 'No leftover AI chat phrasing detected.',
-    delta: boilerplateHit ? -35 : 0,
-    hit: boilerplateHit,
-  });
-  // 2. Comment density, checks for over-commenitng of AI
-  const comments = codeText.match(/\/\*[\s\S]*?\*\/|\/\/.*/g) || [];
-  const density = comments.length > 0 ? len / comments.length : Infinity;
-  const densityHit = comments.length > 3 && density < 60;
-  checks.push({
-    label: 'Comment density',
-    detail: densityHit
-      ? 'Unusually high, uniform comment-to-code ratio (typical of AI narration).'
-      : 'Comment density looks organic.',
-    delta: densityHit ? -15 : 0,
-    hit: densityHit,
-  });
-     // 3. Commit cadence
-  const commits = parseInt(commitCount, 10) || 1;
-  let commitDelta = 0;
-  if (commits <= 1) commitDelta = -25;
-  else if (commits <= 3) commitDelta = -15;
-  else if (commits <= 6) commitDelta = -5;
-  checks.push({
-    label: 'Commit cadence',
-    detail: `${commits} commit${commits === 1 ? '' : 's'} reported — ${
-      commitDelta < -15 ? 'reads like a single copy-paste drop' :
-      commitDelta < 0 ? 'a thin history for the amount of code' :
-      'a believable iterative build history'
-    }.`,
-    delta: commitDelta,
-    hit: commitDelta < 0,
-  });
-      // 4. Line-length uniformity, to check if its really too evenly-wrapped or its normal
-  const lines = codeText.split('\n').filter(l => l.trim().length > 0);
-  let uniformityHit = false;
-  if (lines.length >= 8) {
-    const lengths = lines.map(l => l.length);
-    const mean = lengths.reduce((a, b) => a + b, 0) / lengths.length;
-    const variance = lengths.reduce((a, b) => a + (b - mean) ** 2, 0) / lengths.length;
-    const stddev = Math.sqrt(variance);
-    uniformityHit = stddev < 6 && mean > 20;
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CodePulse — Human Contribution Diagnostic</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --paper:#FBEFF0;
+    --paper-2:#F6E3E5;
+    --grid:#E7C3C8;
+    --ink:#221A1C;
+    --muted:#8A6E73;
+    --trace:#D62839;
+    --trace-soft:#E98A93;
+    --good:#1F7A4D;
+    --good-bg:#E4F3EA;
+    --mixed:#B8752E;
+    --mixed-bg:#FBF0DE;
+    --bad:#B3242F;
+    --bad-bg:#FBE4E3;
+    --line:#D8B3B7;
+    font-size:16px;
   }
-  checks.push({
-    label: 'Formatting variance',
-    detail: uniformityHit
-      ? 'Line lengths are suspiciously uniform — little of the natural raggedness of hand-typed code.'
-      : 'Natural variation in line length and structure.',
-    delta: uniformityHit ? -10 : 0,
-    hit: uniformityHit,
-  });
-      // 5. Human "mess" markers — TODOs, debug logs, commented-out old code
-  const messHit = /todo|fixme|xxx|console\.log\(|\/\/ *(old|remove|temp|hack)/i.test(codeText);
-  checks.push({
-    label: 'Iteration residue',
-    detail: messHit
-      ? 'Found TODOs, debug logging, or leftover scaffolding — a normal fingerprint of real iteration.'
-      : (lines.length > 20 ? 'Long, fully-polished file with zero iteration residue — a little too clean.' : 'File too short to judge iteration residue.'),
-    delta: messHit ? 8 : (lines.length > 20 ? -8 : 0),
-    hit: messHit,
-  });
-      // 6. Repetition ratio (near-duplicate lines, are much common in templated AI )
-  let repetitionHit = false;
-  if (lines.length >= 10) {
-    const counts = new Map();
-    lines.forEach(l => {
-      const key = l.trim();
-      counts.set(key, (counts.get(key) || 0) + 1);
+  *{box-sizing:border-box;}
+  html,body{margin:0;padding:0;}
+  body{
+    background:var(--paper);
+    color:var(--ink);
+    font-family:'IBM Plex Sans', system-ui, sans-serif;
+    line-height:1.5;
+    background-image:
+      linear-gradient(var(--grid) 1px, transparent 1px),
+      linear-gradient(90deg, var(--grid) 1px, transparent 1px);
+    background-size: 28px 28px;
+    background-position: -1px -1px;
+  }
+  a{color:var(--trace);}
+  ::selection{background:var(--trace); color:#fff;}
+
+  .wrap{max-width:840px; margin:0 auto; padding:0 20px 80px;}
+
+  header.masthead{
+    padding-top:36px;
+    display:flex;
+    justify-content:space-between;
+    align-items:flex-end;
+    flex-wrap:wrap;
+    gap:12px;
+    border-bottom:2px solid var(--ink);
+    padding-bottom:16px;
+  }
+  .brand{
+    font-family:'IBM Plex Mono', monospace;
+    font-weight:700;
+    font-size:1.9rem;
+    letter-spacing:-0.02em;
+  }
+  .brand .dot{color:var(--trace);}
+  .meta{
+    font-family:'IBM Plex Mono', monospace;
+    font-size:0.72rem;
+    color:var(--muted);
+    text-align:right;
+    letter-spacing:0.04em;
+    text-transform:uppercase;
+  }
+  .tagline{
+    font-size:0.95rem;
+    color:var(--muted);
+    margin-top:4px;
+  }
+
+  .strip{
+    margin-top:0;
+    border-bottom:1px solid var(--line);
+    background:var(--paper-2);
+    overflow:hidden;
+    height:64px;
+    position:relative;
+  }
+  .strip svg{
+    height:100%;
+    width:200%;
+    display:block;
+    animation: sweep 7s linear infinite;
+  }
+  @media (prefers-reduced-motion: reduce){
+    .strip svg{ animation:none; width:100%; }
+  }
+  @keyframes sweep{
+    from{ transform:translateX(0); }
+    to{ transform:translateX(-50%); }
+  }
+  .strip-label{
+    position:absolute;
+    left:20px; top:6px;
+    font-family:'IBM Plex Mono', monospace;
+    font-size:0.65rem;
+    letter-spacing:0.08em;
+    color:var(--muted);
+    text-transform:uppercase;
+    z-index:2;
+  }
+
+  .intro{
+    padding-top:24px;
+    max-width:60ch;
+  }
+  .intro p{color:var(--ink); font-size:1.02rem;}
+
+  form.intake{
+    margin-top:28px;
+    border:1.5px solid var(--ink);
+    background:var(--paper-2);
+    padding:24px;
+  }
+  .form-title{
+    font-family:'IBM Plex Mono', monospace;
+    font-size:0.75rem;
+    letter-spacing:0.1em;
+    text-transform:uppercase;
+    color:var(--muted);
+    margin-bottom:18px;
+    display:flex;
+    justify-content:space-between;
+  }
+  .field{margin-bottom:18px;}
+  .field label{
+    display:block;
+    font-family:'IBM Plex Mono', monospace;
+    font-size:0.78rem;
+    font-weight:600;
+    margin-bottom:6px;
+    color:var(--ink);
+  }
+  .field .hint{
+    font-weight:400;
+    color:var(--muted);
+    text-transform:none;
+    letter-spacing:0;
+  }
+  input[type="text"], input[type="number"], textarea{
+    width:100%;
+    background:var(--paper);
+    border:1.5px solid var(--ink);
+    padding:10px 12px;
+    font-family:'IBM Plex Mono', monospace;
+    font-size:0.9rem;
+    color:var(--ink);
+    resize:vertical;
+  }
+  textarea{min-height:160px; line-height:1.5;}
+  input:focus, textarea:focus, button:focus{
+    outline:3px solid var(--trace);
+    outline-offset:1px;
+  }
+  .row-2{display:flex; gap:16px; flex-wrap:wrap;}
+  .row-2 .field{flex:1; min-width:180px;}
+
+  button.run{
+    font-family:'IBM Plex Mono', monospace;
+    font-weight:600;
+    font-size:0.9rem;
+    letter-spacing:0.04em;
+    text-transform:uppercase;
+    background:var(--ink);
+    color:var(--paper);
+    border:none;
+    padding:13px 22px;
+    cursor:pointer;
+    transition:background 0.15s ease;
+  }
+  button.run:hover{background:var(--trace);}
+  button.run:disabled{background:var(--muted); cursor:progress;}
+
+  .error-msg{
+    margin-top:14px;
+    color:var(--bad);
+    background:var(--bad-bg);
+    border:1px solid var(--bad);
+    padding:10px 14px;
+    font-family:'IBM Plex Mono', monospace;
+    font-size:0.82rem;
+    display:none;
+  }
+  .error-msg.show{display:block;}
+
+  section.report{
+    margin-top:36px;
+    display:none;
+  }
+  section.report.show{display:block;}
+
+  .report-head{
+    display:flex;
+    justify-content:space-between;
+    align-items:flex-start;
+    flex-wrap:wrap;
+    gap:20px;
+    border-bottom:2px solid var(--ink);
+    padding-bottom:18px;
+  }
+  .score-block{
+    font-family:'IBM Plex Mono', monospace;
+  }
+  .score-label{
+    font-size:0.72rem; letter-spacing:0.1em; text-transform:uppercase; color:var(--muted);
+  }
+  .score-value{
+    font-size:3.4rem;
+    font-weight:700;
+    line-height:1;
+    margin-top:4px;
+  }
+  .score-value span{font-size:1.4rem; color:var(--muted); font-weight:500;}
+
+  .stamp{
+    font-family:'IBM Plex Mono', monospace;
+    font-weight:700;
+    font-size:0.95rem;
+    letter-spacing:0.06em;
+    text-transform:uppercase;
+    border:3px double currentColor;
+    padding:10px 16px;
+    transform:rotate(-4deg);
+    display:inline-block;
+    white-space:nowrap;
+  }
+  .stamp.good{color:var(--good); background:var(--good-bg);}
+  .stamp.mixed{color:var(--mixed); background:var(--mixed-bg);}
+  .stamp.bad{color:var(--bad); background:var(--bad-bg);}
+
+  .result-strip{
+    height:90px;
+    background:var(--paper-2);
+    border-bottom:1px solid var(--line);
+    overflow:hidden;
+    position:relative;
+  }
+  .result-strip svg{width:100%; height:100%; display:block;}
+
+  .repo-line{
+    font-family:'IBM Plex Mono', monospace;
+    font-size:0.78rem;
+    color:var(--muted);
+    padding:10px 0;
+    border-bottom:1px solid var(--line);
+    word-break:break-all;
+  }
+
+  .findings{
+    padding-top:8px;
+  }
+  .findings-title{
+    font-family:'IBM Plex Mono', monospace;
+    font-size:0.75rem;
+    letter-spacing:0.1em;
+    text-transform:uppercase;
+    color:var(--muted);
+    margin:18px 0 10px;
+  }
+  .finding{
+    display:flex;
+    gap:12px;
+    padding:12px 0;
+    border-bottom:1px solid var(--line);
+    align-items:flex-start;
+  }
+  .finding:last-child{border-bottom:none;}
+  .finding .mark{
+    font-family:'IBM Plex Mono', monospace;
+    font-weight:700;
+    font-size:0.85rem;
+    min-width:44px;
+    text-align:right;
+  }
+  .finding.hit .mark{color:var(--bad);}
+  .finding.hit.bonus .mark{color:var(--good);}
+  .finding.pass .mark{color:var(--muted);}
+  .finding .text .label{font-weight:600; font-size:0.92rem;}
+  .finding .text .detail{color:var(--muted); font-size:0.86rem; margin-top:2px;}
+
+  footer{
+    margin-top:60px;
+    padding-top:16px;
+    border-top:1px solid var(--line);
+    font-family:'IBM Plex Mono', monospace;
+    font-size:0.72rem;
+    color:var(--muted);
+    display:flex;
+    justify-content:space-between;
+    flex-wrap:wrap;
+    gap:8px;
+  }
+
+  @media (max-width:600px){
+    .brand{font-size:1.5rem;}
+    .meta{text-align:left;}
+    .score-value{font-size:2.6rem;}
+    header.masthead{flex-direction:column; align-items:flex-start;}
+  }
+</style>
+</head>
+<body>
+
+<div class="strip" aria-hidden="true">
+  <span class="strip-label">Signal — awaiting sample</span>
+  <svg id="idleWave" viewBox="0 0 1600 64" preserveAspectRatio="none"></svg>
+</div>
+
+<div class="wrap">
+  <header class="masthead">
+    <div>
+      <div class="brand">CODE<span class="dot">·</span>PULSE</div>
+      <div class="tagline">Human contribution diagnostic — by Manbir Kaur</div>
+    </div>
+    <div class="meta">Form CP-1<br>Built for hackathon &amp; buildathon judges</div>
+  </header>
+
+  <div class="intro">
+    <p><strong>HEY ALL HACKATHON/BUILDATHON JUDGES!</strong> This tool is a superb problem-solver, meant exclusively for you. It checks if the projects made have a significant human contribution involved in them or are they just a bundle of AI-generated code.</p>
+    <p>Paste a repository link, a representative code sample, and the commit count. CodePulse reads the sample for the fingerprints of real iteration — messy edges, uneven formatting, a believable commit history — and tells you whether there's a human pulse behind it, or a flatline.</p>
+  </div>
+
+  <form class="intake" id="auditForm">
+    <div class="form-title"><span>Intake</span><span>Diagnostic input</span></div>
+
+    <div class="field">
+      <label for="repoUrl">Repository link</label>
+      <input type="text" id="repoUrl" name="repoUrl" placeholder="https://github.com/username/project" required>
+    </div>
+
+    <div class="field">
+      <label for="codeSample">Code sample <span class="hint">— paste the file or block you want checked</span></label>
+      <textarea id="codeSample" name="codeSample" placeholder="Paste a representative chunk of the codebase here…" required></textarea>
+    </div>
+
+    <div class="row-2">
+      <div class="field">
+        <label for="commits">Commit count <span class="hint">— total commits on the repo</span></label>
+        <input type="number" id="commits" name="commits" min="0" value="1" required>
+      </div>
+    </div>
+
+    <button type="submit" class="run" id="runBtn">Run diagnostic</button>
+    <div class="error-msg" id="errorMsg"></div>
+  </form>
+
+  <section class="report" id="report" aria-live="polite">
+    <div class="report-head">
+      <div class="score-block">
+        <div class="score-label">Contribution score</div>
+        <div class="score-value" id="scoreValue">—<span>/100</span></div>
+      </div>
+      <div class="stamp" id="stamp">—</div>
+    </div>
+
+    <div class="result-strip" aria-hidden="true">
+      <svg id="resultWave" viewBox="0 0 800 90" preserveAspectRatio="none"></svg>
+    </div>
+
+    <div class="repo-line" id="repoLine"></div>
+
+    <div class="findings">
+      <div class="findings-title">Findings</div>
+      <div id="findingsList"></div>
+    </div>
+  </section>
+
+  <footer>
+    <span>CodePulse — built for the Zerops Challenge</span>
+    <span>A heuristic reading, not a verdict on its own</span>
+  </footer>
+</div>
+
+<script>
+function buildWavePath(width, height, score, beats) {
+  const irregularity = Math.max(0.06, score / 100);
+  const baseline = height * 0.62;
+  const unit = width / beats;
+  let points = [];
+  let x = 0;
+  for (let b = 0; b < beats; b++) {
+    const jitter = (Math.random() - 0.5) * irregularity;
+    const uW = unit * (1 + jitter * 0.3);
+    const spike = height * (0.28 + irregularity * 0.55 * (0.6 + Math.random() * 0.4));
+
+    points.push([x, baseline]);
+    points.push([x + uW * 0.32, baseline - spike * 0.12 * (0.4 + irregularity)]);
+    points.push([x + uW * 0.42, baseline + spike * 0.08]);
+    points.push([x + uW * 0.47, baseline - spike]);
+    points.push([x + uW * 0.52, baseline + spike * 0.35]);
+    points.push([x + uW * 0.62, baseline - spike * 0.18 * (0.5 + irregularity)]);
+    points.push([x + uW * 0.78, baseline]);
+    points.push([x + uW, baseline]);
+    x += uW;
+  }
+  let d = `M0,${baseline} `;
+  points.forEach(p => { d += `L${p[0].toFixed(1)},${p[1].toFixed(1)} `; });
+  return { d, width: x };
+}
+
+function renderWave(svgEl, score, color, beatsPerLoop, loop) {
+  const height = svgEl.viewBox.baseVal.height || 64;
+  const targetWidth = svgEl.viewBox.baseVal.width || 1600;
+  const { d, width } = buildWavePath(targetWidth / (loop ? 2 : 1), height, score, beatsPerLoop);
+  svgEl.innerHTML = '';
+  const ns = 'http://www.w3.org/2000/svg';
+  const makePath = (offsetX) => {
+    const path = document.createElementNS(ns, 'path');
+    path.setAttribute('d', d);
+    path.setAttribute('transform', `translate(${offsetX},0)`);
+    path.setAttribute('fill', 'none');
+    path.setAttribute('stroke', color);
+    path.setAttribute('stroke-width', '2');
+    path.setAttribute('stroke-linecap', 'round');
+    path.setAttribute('stroke-linejoin', 'round');
+    return path;
+  };
+  svgEl.appendChild(makePath(0));
+  if (loop) svgEl.appendChild(makePath(width));
+}
+
+const idleSvg = document.getElementById('idleWave');
+renderWave(idleSvg, 55, '#C98D93', 6, true);
+
+const form = document.getElementById('auditForm');
+const runBtn = document.getElementById('runBtn');
+const errorMsg = document.getElementById('errorMsg');
+const report = document.getElementById('report');
+
+form.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  errorMsg.classList.remove('show');
+  runBtn.disabled = true;
+  runBtn.textContent = 'Reading signal…';
+
+  const repoUrl = document.getElementById('repoUrl').value.trim();
+  const codeSample = document.getElementById('codeSample').value;
+  const commits = document.getElementById('commits').value;
+
+  try {
+    const res = await fetch('/api/audit', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ repoUrl, codeSample, commits }),
     });
-    const duplicates = [...counts.values()].filter(c => c > 1).reduce((a, b) => a + b, 0);
-    repetitionHit = duplicates / lines.length > 0.35;
+    const data = await res.json();
+
+    if (!res.ok) throw new Error(data.error || 'Diagnostic failed.');
+
+    renderReport(data);
+  } catch (err) {
+    errorMsg.textContent = err.message || 'Something went wrong reading that sample.';
+    errorMsg.classList.add('show');
+  } finally {
+    runBtn.disabled = false;
+    runBtn.textContent = 'Run diagnostic';
   }
-  checks.push({
-    label: 'Structural repetition',
-    detail: repetitionHit
-      ? 'High ratio of near-identical lines — consistent with templated generation.'
-      : 'Low repetition, structure looks purpose-built.',
-    delta: repetitionHit ? -10 : 0,
-    hit: repetitionHit,
+});
+
+function renderReport(data) {
+  document.getElementById('scoreValue').innerHTML = `${data.score}<span>/100</span>`;
+  document.getElementById('repoLine').textContent = `${data.repository} — checked ${data.checkedAt}`;
+
+  const stamp = document.getElementById('stamp');
+  stamp.textContent = data.verdict;
+  stamp.className = 'stamp ' + (data.score < 50 ? 'bad' : data.score < 80 ? 'mixed' : 'good');
+
+  const color = data.score < 50 ? '#B3242F' : data.score < 80 ? '#B8752E' : '#1F7A4D';
+  const resultSvg = document.getElementById('resultWave');
+  renderWave(resultSvg, data.score, color, 4, false);
+
+  const list = document.getElementById('findingsList');
+  list.innerHTML = '';
+  data.checks.forEach(c => {
+    const row = document.createElement('div');
+    const bonus = c.hit && c.delta > 0;
+    row.className = 'finding ' + (c.hit ? 'hit' : 'pass') + (bonus ? ' bonus' : '');
+    const markText = c.delta === 0 ? 'OK' : (c.delta > 0 ? `+${c.delta}` : `${c.delta}`);
+    row.innerHTML = `
+      <div class="mark">${markText}</div>
+      <div class="text">
+        <div class="label">${c.label}</div>
+        <div class="detail">${c.detail}</div>
+      </div>`;
+    list.appendChild(row);
   });
-return checks;
+
+  report.classList.add('show');
+  report.scrollIntoView({ behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth', block: 'start' });
 }
- 
-function audit(codeText, commitCount) {
-  const checks = runChecks(codeText, commitCount);
-  let score = 100 + checks.reduce((sum, c) => sum + c.delta, 0);
-  score = Math.max(0, Math.min(100, Math.round(score)));
-
-  let verdict = 'Highly Authentic Human Work';
-  if (score < 50) verdict = 'Flagged: Pure AI Generation Suspected';
-  else if (score < 80) verdict = 'Mixed: AI-Assisted with Human Structure';
-
-  const flags = checks.filter(c => c.hit).map(c => `${c.label}: ${c.detail}`);
-
-  return { score, verdict, flags, checks };
-}
-    
-app.post('/api/audit', (req, res) => {
-  const { repoUrl, codeSample, commits } = req.body || {};
-
-  if (!repoUrl || !codeSample) {
-    return res.status(400).json({ error: 'Please provide both a repository link and a code snippet.' });
-  }
-  if (typeof codeSample !== 'string' || codeSample.length > 200000) {
-    return res.status(400).json({ error: 'Code snippet is missing or too large (200KB max).' });
-  }
-
-  const result = audit(codeSample, commits || 1);
-  res.json({
-    repository: repoUrl,
-    checkedAt: new Date().toLocaleTimeString(),
-    ...result,
-  });
-});
-
-app.get('/api/health', (req, res) => res.json({ status: 'ok' }));
-
-// Fallback to the SPA shell for any non-API route
-app.get('*', (req, res, next) => {
-  if (req.path.startsWith('/api/')) return next();
-  res.sendFile(path.join(__dirname, 'public', 'index.html'));
-});
-
-app.use((err, req, res, next) => {
-  console.error(err);
-  res.status(500).json({ error: 'Something went wrong on the server.' });
-});
-
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`CodePulse backend engine successfully online on port ${PORT}`));
+</script>
+</body>
+</html>
