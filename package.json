@@ -8,6 +8,8 @@
   },
   "dependencies": {
     "express": "^4.19.2",
-    "compression": "^1.7.4"
+    "compression": "^1.7.4",
+    "express-rate-limit": "^6.6.0",
+    "validator": "^13.7.0"
   }
 }
