@@ -1,12 +1,13 @@
 {
   "name": "codepulse",
   "version": "1.0.0",
-  "description": "Hackathon Verification System",
+  "description": "Hackathon Verification System - detects meaningful human contribution in AI-assisted code",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
-    "express": "^4.19.2"
+    "express": "^4.19.2",
+    "compression": "^1.7.4"
   }
 }
