@@ -7,6 +7,7 @@ zerops:
       deployFiles:
         - index.js
         - package.json
+        - public
     run:
       base: nodejs@22
       ports:
