@@ -1,11 +1,10 @@
 const express = require('express');
-const compress = require('compress');
+const compression = require('compression');
 const path = require('path');
 
 const app = express();
 
-// --- Middleware 
-app.use(compress());
+app.use(compression());
 app.use(express.json({ limit: '2mb' }));
 
 app.use((req, res, next) => {
