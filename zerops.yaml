@@ -1,0 +1,12 @@
+zerops:
+  - setup: codepulse
+    build:
+      base: nodejs@22
+      deployFiles:
+        - index.js
+    run:
+      base: nodejs@22
+      ports:
+        - port: 3000
+          httpSupport: true
+      start: node index.js
