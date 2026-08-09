@@ -6,7 +6,6 @@ zerops:
         - npm install
       deployFiles:
         - index.js
-        - public/
         - package.json
     run:
       base: nodejs@22
