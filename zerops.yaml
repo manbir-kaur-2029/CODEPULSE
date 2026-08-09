@@ -2,8 +2,12 @@ zerops:
   - setup: codepulse
     build:
       base: nodejs@22
+      buildCommands:
+        - npm install
       deployFiles:
         - index.js
+        - public/
+        - package.json
     run:
       base: nodejs@22
       ports:
