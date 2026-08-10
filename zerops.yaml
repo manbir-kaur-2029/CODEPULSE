@@ -1,15 +1,16 @@
-setup: codepulse
-build:
-  base: nodejs@22
-  buildCommands:
-    - npm install
-  deployFiles:
-    - index.js
-    - package.json
-    - public
-run:
-  base: nodejs@22
-  ports:
-    - port: 3000
-      httpSupport: true
-  start: node index.js
+zerops:
+  - setup: codepulse
+    build:
+      base: nodejs@22
+      buildCommands:
+        - npm install
+      deployFiles:
+        - index.js
+        - package.json
+        - public
+    run:
+      base: nodejs@22
+      ports:
+        - port: 3000
+          httpSupport: true
+      start: node index.js
