@@ -8,6 +8,7 @@ zerops:
         - index.js
         - package.json
         - public
+        - node_modules
     run:
       base: nodejs@22
       ports:
