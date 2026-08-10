@@ -1,5 +1,5 @@
 zerops:
-  - setup: codepulse
+  - setup: nodejs
     build:
       base: nodejs@22
       buildCommands:
