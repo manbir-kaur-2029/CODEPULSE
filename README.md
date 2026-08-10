@@ -33,7 +33,7 @@ LINKEDIN POST:  https://www.linkedin.com/posts/manbir-kaur-dev_codepulse-zeropsc
 
 7. Limitations— it's a helper tool, not the proof itself. Careful human coders may score "suspicious". It still needs lot more improvement to actually judge accuracy of "how much" human contribution is there in the project but I feel it can at least give us idea about this much at the moment, if the code is completely AI-generated or has some human contribution in it. 
 
-8. AI tools used— Claude, google.ai, 2 debugger AI tools like debugger.ai
+8. AI tools used— Claude, google.ai, debugger AI tools like debugger.ai
 
 9. Setup instructions — `npm install`, `npm start`
 
