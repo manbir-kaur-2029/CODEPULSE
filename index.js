@@ -1,12 +1,10 @@
 const express = require('express');
 const compression = require('compression');
 const rateLimit = require('express-rate-limit');
-const validator = require('validator');
-
 const app = express();
 
 // Middleware setup
-app.use(express.json({ limit: '10mb' })); // Limit input size
+app.use(express.json({ limit: '10mb' }));
 app.use(compression());
 
 // Rate limiting
@@ -16,82 +14,124 @@ const limiter = rateLimit({
 });
 app.use(limiter);
 
-// Enforce HTTPS and set security headers
+// Security header only — no redirect.
+// Zerops terminates TLS at the edge; a redirect here can loop or block
+// health checks and cause 502s.
 app.use((req, res, next) => {
-  if (req.headers['x-forwarded-proto'] !== 'https') {
-    // Redirect to HTTPS
-    return res.redirect(`https://${req.headers.host}${req.url}`);
-  }
-  // Set HSTS header
   res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
   next();
 });
 
-// Main route
-app.post('/check', (req, res) => {
+// Serve the frontend
+app.use(express.static('public'));
+
+// Main route — matches the frontend's fetch('/api/audit')
+app.post('/api/audit', (req, res) => {
   try {
-    // Validate and sanitize input
-    const codeInputRaw = req.body.code;
-    const commitCountRaw = req.body.commitCount;
+    const { repoUrl, codeSample, commits } = req.body;
 
-    if (typeof codeInputRaw !== 'string' || typeof commitCountRaw !== 'string') {
-      return res.status(400).send('Invalid input types.');
+    if (typeof repoUrl !== 'string' || typeof codeSample !== 'string') {
+      return res.status(400).json({ error: 'Invalid input types.' });
     }
 
-    const codeText = validator.escape(codeInputRaw);
-    const commitCountStr = validator.escape(commitCountRaw);
-
-    // Parse commit count
-    const commitCount = parseInt(commitCountStr, 10);
+    const commitCount = parseInt(commits, 10);
     if (isNaN(commitCount) || commitCount < 0) {
-      return res.status(400).send('Invalid commit count.');
+      return res.status(400).json({ error: 'Invalid commit count.' });
     }
 
-    // Check input size limit
     const MAX_SIZE = 10 * 1024 * 1024; // 10MB
-    if (codeText.length > MAX_SIZE) {
-      return res.status(413).send('Input too large.');
+    if (codeSample.length > MAX_SIZE) {
+      return res.status(413).json({ error: 'Input too large.' });
     }
 
-    // Run checks
-    const results = runChecks(codeText, commitCount);
-    res.json(results);
+    const result = runChecks(repoUrl.trim(), codeSample, commitCount);
+    res.json(result);
   } catch (err) {
     console.error('Error processing request:', err);
-    res.status(500).send('Server Error');
+    res.status(500).json({ error: 'Server error while running diagnostic.' });
   }
 });
 
 // Function: runChecks
-function runChecks(codeText, commitCount) {
-  // Initialize constants for thresholds
-  const COMMENT_THRESHOLD = 35;
-  const LINE_THRESHOLD = 15;
-  const DENSITY_THRESHOLD = 0.05;
-  
-  // Count lines
+// NOTE: this is a heuristic, not a forensic tool. It scores signals that
+// loosely correlate with iterative human editing vs. single-pass generation.
+function runChecks(repoUrl, codeText, commitCount) {
   const lines = codeText.split(/\r?\n/);
   const totalLines = lines.length;
 
-  // Count comments with safer regex (avoid nested quantifiers)
   const commentRegex = /\/\*[\s\S]*?\*\/|\/\/[^\n]*/g;
   const comments = codeText.match(commentRegex) || [];
   const commentCount = comments.length;
-
-  // Compute comment density safely
   const density = totalLines === 0 ? 0 : commentCount / totalLines;
 
-  // Check for large code
-  const isLargeCode = codeText.length > 1_000_000; // Example threshold
+  // Rough "line length variance" — real edited code tends to be uneven;
+  // generated code in one pass tends to be suspiciously uniform.
+  const nonEmptyLines = lines.filter(l => l.trim().length > 0);
+  const avgLen = nonEmptyLines.length
+    ? nonEmptyLines.reduce((sum, l) => sum + l.length, 0) / nonEmptyLines.length
+    : 0;
+  const variance = nonEmptyLines.length
+    ? nonEmptyLines.reduce((sum, l) => sum + Math.pow(l.length - avgLen, 2), 0) / nonEmptyLines.length
+    : 0;
+  const stdDev = Math.sqrt(variance);
 
-  // Return results
+  let score = 50;
+  const checks = [];
+
+  // Commit history check
+  if (commitCount <= 1) {
+    score -= 20;
+    checks.push({ hit: true, delta: -20, label: 'Single-commit history', detail: `Only ${commitCount} commit(s) found — no visible iteration.` });
+  } else if (commitCount < 5) {
+    score -= 8;
+    checks.push({ hit: true, delta: -8, label: 'Sparse commit history', detail: `${commitCount} commits — limited iteration trail.` });
+  } else {
+    score += 15;
+    checks.push({ hit: true, delta: 15, label: 'Healthy commit history', detail: `${commitCount} commits suggest incremental work.` });
+  }
+
+  // Comment density check
+  if (density > 0.35) {
+    score -= 15;
+    checks.push({ hit: true, delta: -15, label: 'Unusually high comment density', detail: `${(density * 100).toFixed(1)}% of lines are comments — often a generation artifact.` });
+  } else if (density < 0.02 && totalLines > 30) {
+    score -= 5;
+    checks.push({ hit: true, delta: -5, label: 'Almost no comments', detail: 'Long sample with virtually no explanatory comments.' });
+  } else {
+    score += 5;
+    checks.push({ hit: true, delta: 5, label: 'Reasonable comment density', detail: `${(density * 100).toFixed(1)}% of lines are comments.` });
+  }
+
+  // Line-length uniformity check
+  if (stdDev < 8 && nonEmptyLines.length > 20) {
+    score -= 10;
+    checks.push({ hit: true, delta: -10, label: 'Uniform formatting', detail: 'Line lengths are unusually consistent across the sample.' });
+  } else {
+    score += 5;
+    checks.push({ hit: true, delta: 5, label: 'Natural formatting variance', detail: 'Line lengths vary the way hand-edited code typically does.' });
+  }
+
+  // Sample size sanity check
+  if (totalLines < 15) {
+    score -= 5;
+    checks.push({ hit: false, delta: 0, label: 'Small sample size', detail: `Only ${totalLines} lines submitted — low confidence reading.` });
+  } else {
+    checks.push({ hit: false, delta: 0, label: 'Sample size adequate', detail: `${totalLines} lines analyzed.` });
+  }
+
+  score = Math.max(0, Math.min(100, Math.round(score)));
+
+  let verdict;
+  if (score < 50) verdict = 'Likely AI-generated';
+  else if (score < 80) verdict = 'Mixed signal';
+  else verdict = 'Likely human-driven';
+
   return {
-    totalLines,
-    commentCount,
-    density,
-    commitCount,
-    isLargeCode,
-    // Additional metrics can be added here
+    score,
+    verdict,
+    repository: repoUrl || '(no repository link provided)',
+    checkedAt: new Date().toISOString(),
+    checks,
   };
 }
 
